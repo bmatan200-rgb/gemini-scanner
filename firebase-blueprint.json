@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A tracked product with price information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "currentPrice": { "type": "number" },
+        "previousPrice": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "store": { "type": "string" }
+      },
+      "required": ["name", "currentPrice", "userId"]
+    },
+    "PriceRecord": {
+      "title": "Price Record",
+      "description": "A historical price snapshot",
+      "type": "object",
+      "properties": {
+        "price": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "store": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["price", "date", "userId"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "A scanned invoice document",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string" },
+        "store": { "type": "string" },
+        "total": { "type": "number" },
+        "invoiceNumber": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "items": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "required": ["userId", "items"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Collection of tracked products"
+    },
+    "/products/{productId}/history/{historyId}": {
+      "schema": "PriceRecord",
+      "description": "Sub-collection of price history for a specific product"
+    },
+    "/invoices/{invoiceId}": {
+      "schema": "Invoice",
+      "description": "Collection of scanned invoices"
+    }
+  }
+}

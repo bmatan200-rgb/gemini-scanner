@@ -1,0 +1,264 @@
+import React, { useRef, useState } from 'react';
+import { Camera, Loader2, CheckCircle2, AlertCircle, FileText } from 'lucide-react';
+import { scanInvoice } from '../lib/gemini';
+import { saveInvoice } from '../lib/productService';
+import { motion, AnimatePresence } from 'motion/react';
+import { cn } from '../lib/utils';
+
+import { compressImage } from '../lib/imageUtils';
+
+interface ScannerProps {
+  onComplete: () => void;
+  knownProducts?: string[];
+}
+
+export default function Scanner({ onComplete, knownProducts = [] }: ScannerProps) {
+  const [loading, setLoading] = useState(false);
+  const [loadingStep, setLoadingStep] = useState<string>('');
+  const [previews, setPreviews] = useState<{ url: string, type: string }[]>([]);
+  const [status, setStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>, isCamera = false) => {
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0) return;
+
+    setLoading(true);
+    setStatus(null);
+    setPreviews([]);
+    setLoadingStep('מתחיל עיבוד...');
+    
+    const fileParts: { data: string, mimeType: string }[] = [];
+    
+    try {
+      if (files.length > 5) {
+        throw new Error('ניתן להעלות עד 5 דפים בבת אחת.');
+      }
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        // 15MB limit per file
+        if (file.size > 15 * 1024 * 1024) {
+           setStatus({ type: 'error', message: `הקובץ "${file.name}" גדול מדי.` });
+           continue; 
+        }
+
+        setLoadingStep(`מכין דף ${i + 1} מתוך ${files.length}...`);
+        
+        let processedBase64: string;
+
+        if (file.type.startsWith('image/')) {
+          try {
+            // Give UI a chance to render
+            await new Promise(r => setTimeout(r, 200));
+            // Very aggressive compression for mobile stability
+            // 2048px is enough for Gemini to read text clearly
+            processedBase64 = await compressImage(file, 2048, 0.9);
+          } catch (compressErr) {
+            console.error("Compression failed:", compressErr);
+            // Fallback
+            processedBase64 = await new Promise<string>((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = (event) => resolve(event.target?.result as string);
+              r.onerror = () => reject(new Error('שגיאה בקריאת הקובץ'));
+              r.readAsDataURL(file);
+            });
+          }
+        } else {
+          // PDF handling
+          processedBase64 = await new Promise<string>((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = (event) => resolve(event.target?.result as string);
+            r.onerror = () => reject(new Error('שגיאה בקריאת הקובץ'));
+            r.readAsDataURL(file);
+          });
+        }
+
+        fileParts.push({ data: processedBase64, mimeType: file.type.startsWith('image/') ? 'image/jpeg' : file.type });
+        setPreviews(prev => [...prev, { url: processedBase64, type: file.type }]);
+        
+        // Help garbage collection
+        (files[i] as any) = null;
+      }
+
+      if (fileParts.length === 0) {
+        setLoading(false);
+        return;
+      }
+
+      setLoadingStep('מנתח חשבונית בעזרת AI...');
+      await processImages(fileParts);
+    } catch (err: any) {
+      console.error("File processing error:", err);
+      setStatus({ type: 'error', message: err.message || 'שגיאה בעיבוד הקבצים. נסה שוב עם תמונה אחת.' });
+      setLoading(false);
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (cameraInputRef.current) cameraInputRef.current.value = '';
+    }
+  };
+
+  const processImages = async (files: { data: string, mimeType: string }[]) => {
+    setStatus(null);
+    try {
+      setLoadingStep('מנתח חשבונית בעזרת AI...');
+      console.log("Starting scan with Gemini...");
+      const results = await scanInvoice(files, knownProducts);
+
+      if (results && results.length > 0) {
+        setLoadingStep('שומר נתונים במערכת...');
+        console.log(`Gemini scan success, saving ${results.length} invoices to Firestore...`);
+        let totalAlerts = 0;
+        
+        for (const result of results) {
+          const alertsCount = await saveInvoice(result);
+          totalAlerts += (alertsCount || 0);
+        }
+        
+        const hasRemarks = results.some(r => r.remarks || r.items.some(i => i.remarks));
+        
+        if (totalAlerts > 0) {
+          setStatus({ type: 'success', message: `${results.length} חשבוניות נסרקו! זוהו ${totalAlerts} שינויי מחיר.${hasRemarks ? ' (יש הערות סריקה)' : ''}` });
+        } else {
+          setStatus({ type: 'success', message: `${results.length > 1 ? `${results.length} חשבוניות נסרקו` : 'חשבונית נסרקה'} בהצלחה!${hasRemarks ? ' (יש לבדוק הערות)' : ''}` });
+        }
+        
+        setTimeout(() => {
+          setPreviews([]);
+          setStatus(null);
+          onComplete();
+        }, 3000);
+      } else {
+        console.warn("Gemini returned null result or empty array");
+        setStatus({ type: 'error', message: 'לא הצלחנו לקרוא את החשבונית/ות. נסה שוב או צלם ברור יותר.' });
+      }
+    } catch (err: any) {
+      console.error("Scanner error detail:", err);
+      setStatus({ type: 'error', message: err.message || 'שגיאה בעיבוד החשבונית. בדוק את החיבור לאינטרנט.' });
+    } finally {
+      setLoading(false);
+      setLoadingStep('');
+    }
+  };
+
+  const reset = () => {
+    setPreviews([]);
+    setStatus(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  return (
+    <div className="text-[#1c2b41]">
+      <div className="flex flex-col items-center justify-center gap-4">
+        <div className="relative w-full min-h-[320px] rounded-[2.5rem] border-2 border-dashed border-slate-300 flex flex-col items-center justify-center overflow-visible bg-slate-50 transition-all">
+          {previews.length > 0 ? (
+            <div className="grid grid-cols-2 gap-3 w-full h-full p-6 overflow-auto bg-white/50 backdrop-blur-sm rounded-[2.5rem]">
+              {previews.map((p, i) => (
+                p.type.includes('image') ? (
+                  <img key={i} src={p.url} alt={`Preview ${i}`} className="w-full h-36 object-cover rounded-2xl border border-slate-200 shadow-sm" />
+                ) : (
+                  <div key={i} className="flex flex-col items-center justify-center bg-blue-50 rounded-2xl h-36 border border-blue-100 shadow-sm">
+                    <FileText className="w-10 h-10 text-blue-600" />
+                    <span className="text-[10px] font-black text-blue-700 mt-2 truncate px-2 w-full text-center uppercase tracking-widest">PDF מסמך</span>
+                  </div>
+                )
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-8 py-10 px-6">
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => !loading && cameraInputRef.current?.click()}
+                  className="w-24 h-24 bg-blue-600 text-white rounded-3xl shadow-xl shadow-blue-500/20 flex flex-col items-center justify-center gap-2 hover:bg-blue-700 hover:scale-105 transition-all"
+                >
+                  <Camera className="w-8 h-8" />
+                  <span className="text-[10px] font-black uppercase tracking-widest">מצלמה</span>
+                </button>
+                
+                <button 
+                  onClick={() => !loading && fileInputRef.current?.click()}
+                  className="w-24 h-24 bg-white text-slate-800 rounded-3xl shadow-lg border border-slate-100 flex flex-col items-center justify-center gap-2 hover:bg-slate-50 hover:scale-105 transition-all"
+                >
+                  <FileText className="w-8 h-8 text-blue-600" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">קבצים</span>
+                </button>
+              </div>
+
+              <div className="text-center">
+                <h3 className="text-xl font-black text-slate-900 tracking-tight">הוסף חשבוניות</h3>
+                <p className="text-sm text-slate-500 font-bold mt-2">בחר צילום ישיר או העלה קבצים קיימים</p>
+                <div className="mt-4 px-4 py-1.5 bg-blue-50 border border-blue-100 rounded-full inline-block">
+                  <p className="text-[10px] text-blue-600 font-black uppercase tracking-widest">תומך ב-PDF ובתמונות</p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          <AnimatePresence>
+            {loading && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-blue-600/90 backdrop-blur-sm flex flex-col items-center justify-center text-white p-6 text-center z-20 rounded-[2.5rem]"
+              >
+                <div className="bg-white/10 p-5 rounded-full mb-4">
+                  <Loader2 className="w-12 h-12 animate-spin text-white" />
+                </div>
+                <p className="text-xl font-bold">{loadingStep || `מנתח ${previews.length} דפים בעזרת AI...`}</p>
+                <p className="text-sm opacity-60 mt-2 max-w-[240px]">בינה מלאכותית (Gemini) מעבדת את הקבצים שלך כעת. זה עשוי לקחת עד דקה.</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {status && (
+              <motion.div 
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                className={cn(
+                  "absolute bottom-4 left-4 right-4 p-4 rounded-2xl flex items-center gap-3 shadow-2xl z-30",
+                  status.type === 'success' ? "bg-emerald-500 text-white" : "bg-red-500 text-white"
+                )}
+              >
+                <div className="bg-white/20 p-2 rounded-xl">
+                  {status.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                </div>
+                <span className="font-bold text-sm flex-1">{status.message}</span>
+                {status.type === 'error' && (
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); reset(); }}
+                    className="text-xs bg-white text-red-600 px-3 py-1 rounded-lg font-bold hover:bg-gray-100 transition-colors"
+                  >
+                    נסה שוב
+                  </button>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        <input 
+          type="file" 
+          accept="image/*" 
+          capture="environment"
+          className="hidden" 
+          ref={cameraInputRef} 
+          onChange={(e) => handleFile(e, true)}
+        />
+
+        <input 
+          type="file" 
+          multiple
+          accept="image/*,application/pdf" 
+          className="hidden" 
+          ref={fileInputRef} 
+          onChange={(e) => handleFile(e, false)}
+        />
+      </div>
+    </div>
+  );
+}
+

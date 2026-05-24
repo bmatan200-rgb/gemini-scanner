@@ -1,0 +1,8 @@
+{
+  "name": "סוכן רכישה חכם",
+  "description": "אפליקציה לסריקת חשבוניות ומעקב מדויק אחרי שינויי מחירים בכל קנייה.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}

@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      // Very permissive regex for document IDs, allowing alphanumeric, underscores, hyphens, 
+      // and the full Hebrew block plus common punctuation found in product names.
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Helpers ---
+    
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'currentPrice', 'userId', 'lastUpdated'])
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 400
+        && data.currentPrice is number
+        && data.userId == request.auth.uid
+        && (data.get('previousPrice', null) == null || data.previousPrice is number)
+        && (data.get('store', null) == null || (data.store is string && data.store.size() <= 300))
+        && (data.get('lastInvoiceId', null) == null || (data.lastInvoiceId is string && data.lastInvoiceId.size() <= 128));
+    }
+
+    function isValidPriceRecord(data) {
+      return data.keys().hasAll(['price', 'date', 'userId'])
+        && data.price is number
+        && data.date is string
+        && data.userId == request.auth.uid
+        && (data.get('store', null) == null || (data.store is string && data.store.size() <= 200))
+        && (data.get('invoiceId', null) == null || (data.invoiceId is string && data.invoiceId.size() <= 128));
+    }
+
+    function isValidInvoice(data) {
+      return data.keys().hasAll(['userId', 'items', 'store', 'date', 'total', 'createdAt'])
+        && data.userId == request.auth.uid
+        && data.items is list && data.items.size() <= 1000
+        && data.store is string && data.store.size() <= 400
+        && data.total is number
+        && (data.get('invoiceNumber', null) == null || data.invoiceNumber is string);
+    }
+
+    // --- Rules ---
+
+    match /products/{productId} {
+      allow get: if resource == null || isOwner(existing().get('userId', request.auth.uid));
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn() 
+        && isValidId(productId)
+        && isValidProduct(incoming());
+        
+      allow update: if isOwner(existing().get('userId', request.auth.uid))
+        && isValidProduct(incoming())
+        && (existing().get('userId', null) == null || incoming().userId == existing().userId)
+        && (
+          // Action: Normal update from scan
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'currentPrice', 'previousPrice', 'previousInvoiceId', 'previousDate', 'lastUpdated', 'store', 'lastInvoiceId', 'userId'])
+        );
+      
+      allow delete: if isOwner(existing().get('userId', request.auth.uid));
+
+      match /history/{historyId} {
+        allow get: if resource == null || isOwner(existing().get('userId', request.auth.uid));
+        allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+        allow create: if isSignedIn() && isValidPriceRecord(incoming());
+        allow delete: if isOwner(existing().get('userId', request.auth.uid));
+      }
+    }
+
+    match /invoices/{invoiceId} {
+      allow get: if resource == null || isOwner(existing().get('userId', request.auth.uid));
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn()
+        && isValidId(invoiceId)
+        && isValidInvoice(incoming());
+        
+      allow update: if isOwner(existing().get('userId', request.auth.uid))
+        && isValidInvoice(incoming())
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['total'])
+        );
+      
+      allow delete: if isOwner(existing().get('userId', request.auth.uid));
+    }
+  }
+}
